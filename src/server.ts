@@ -1,6 +1,13 @@
 import "dotenv/config";
 import express from "express";
-import { getGraphApp } from "./index.js";
+import {
+  getGraphApp,
+  sqlTool,
+  scraperTool,
+  codeTool,
+  fileTool,
+  memoryStore,
+} from "./index.js";
 import pino from "pino";
 import { ChatOllama } from "@langchain/ollama";
 import axios from "axios";
@@ -52,7 +59,178 @@ app.get("/health", (req, res) => {
   });
 });
 
-// Simple test endpoint
+// --- TOOL ENDPOINTS ---
+app.post("/api/tool/sql", async (req, res) => {
+  const { query } = req.body;
+  try {
+    const result = await sqlTool.invoke(query);
+    res.json({ success: true, result });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post("/api/tool/scrape", async (req, res) => {
+  const { url } = req.body;
+  try {
+    const result = await scraperTool.invoke(url);
+    res.json({ success: true, result });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post("/api/tool/code", async (req, res) => {
+  const { code } = req.body;
+  try {
+    const result = await codeTool.invoke(code);
+    res.json({ success: true, result });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post("/api/tool/file", async (req, res) => {
+  const { operation, path, content } = req.body;
+  try {
+    const result = await fileTool.invoke({ operation, path, content });
+    res.json({ success: true, result });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post("/api/memory/add", async (req, res) => {
+  const { text, metadata } = req.body;
+  try {
+    const result = await memoryStore.addMemory(text, metadata);
+    res.json({ success: true, result });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post("/api/memory/recall", async (req, res) => {
+  const { query, k } = req.body;
+  try {
+    const result = await memoryStore.recall(query, k || 5);
+    res.json({ success: true, result });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// --- MISSION ENDPOINT ---
+app.post("/api/mission", async (req, res) => {
+  const { query, threadId, tools } = req.body;
+  const missionId = threadId || `mission-${Date.now()}`;
+
+  logger.info({ missionId, query }, "🎯 Mission received");
+
+  if (!query) {
+    return res.status(400).json({ error: "Missing query" });
+  }
+
+  try {
+    const graph = await getGraphApp();
+
+    // Properly initialize state with all required fields
+    const initialState = {
+      input: query,
+      output: "",
+      steps: [],
+      research: "",
+      plan: null,
+      critiqueResult: null,
+      iteration: 0,
+      memories: [],
+      tools: tools || [],
+      threadId: missionId,
+      timestamp: new Date().toISOString(),
+    };
+
+    const config = {
+      configurable: {
+        thread_id: missionId,
+      },
+    };
+
+    logger.info({ missionId }, "🚀 Invoking graph");
+    const result = await graph.invoke(initialState, config);
+
+    logger.info({ missionId }, "✅ Mission complete");
+    res.json({
+      success: true,
+      threadId: missionId,
+      output: result.output || result.research || "No output generated",
+      steps: result.steps || [],
+      critique: result.critiqueResult,
+    });
+  } catch (error: any) {
+    logger.error({ error: error.message, missionId }, "❌ Mission failed");
+    res.status(500).json({
+      success: false,
+      error: error.message,
+    });
+  }
+});
+
+// --- CHECKPOINTING ENDPOINTS ---
+app.get("/api/missions", async (req, res) => {
+  try {
+    const graph = await getGraphApp();
+    const checkpointer = (graph as any).checkpointer;
+    const missions: any[] = [];
+
+    for await (const checkpoint of checkpointer.list({})) {
+      if (checkpoint.config?.configurable?.thread_id) {
+        missions.push({
+          threadId: checkpoint.config.configurable.thread_id,
+          createdAt: checkpoint.created_at,
+        });
+      }
+    }
+
+    res.json(missions);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get("/api/missions/:threadId", async (req, res) => {
+  try {
+    const graph = await getGraphApp();
+    const config = { configurable: { thread_id: req.params.threadId } };
+    const state = await graph.getState(config);
+    res.json(state);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post("/api/missions/:threadId/resume", async (req, res) => {
+  try {
+    const graph = await getGraphApp();
+    const config = { configurable: { thread_id: req.params.threadId } };
+    const result = await graph.invoke(null, config);
+    res.json({ success: true, result });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.delete("/api/missions/:threadId", async (req, res) => {
+  try {
+    const graph = await getGraphApp();
+    const checkpointer = (graph as any).checkpointer;
+    await checkpointer.deleteThread(req.params.threadId);
+    res.json({ success: true });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Test endpoint
 app.post("/api/test", async (req, res) => {
   const { query } = req.body;
 
@@ -68,73 +246,24 @@ app.post("/api/test", async (req, res) => {
       response: response.content,
     });
   } catch (error: any) {
-    logger.error({ error: error.message }, "Test failed");
     res.status(500).json({ error: error.message });
-  }
-});
-
-// Mission endpoint
-app.post("/api/mission", async (req, res) => {
-  const { query, threadId } = req.body;
-  const missionId = threadId || `mission-${Date.now()}`;
-
-  logger.info({ missionId, query }, "🎯 Mission received");
-
-  // Notify board
-  await sendBoardUpdate(missionId, "started", "Mission received", { query });
-
-  if (!query) {
-    await sendBoardUpdate(missionId, "error", "Missing query");
-    return res.status(400).json({ error: "Missing query" });
-  }
-
-  try {
-    const graph = await getGraphApp();
-    const initialState: any = {
-      input: query,
-      output: "",
-      steps: [],
-      research: "",
-    };
-
-    await sendBoardUpdate(missionId, "processing", "Starting supervisor");
-    const result = await graph.invoke(initialState);
-
-    await sendBoardUpdate(missionId, "completed", "Mission complete", {
-      outputLength: result.output?.length,
-    });
-
-    logger.info({ missionId }, "✅ Mission complete");
-    res.json({
-      success: true,
-      threadId: missionId,
-      data: result.output || "No output generated",
-      steps: result.steps || [],
-    });
-  } catch (error: any) {
-    logger.error({ error: error.message, missionId }, "❌ Mission failed");
-    await sendBoardUpdate(missionId, "error", error.message);
-    res.status(500).json({
-      success: false,
-      error: error.message,
-    });
   }
 });
 
 // Start server
 app.listen(PORT, () => {
-  logger.info(`🚀 Main server running on http://localhost:${PORT}`);
+  logger.info(`🚀 Server running on http://localhost:${PORT}`);
   console.log(`
-  📝 Commands:
+  📝 Test Commands:
   
   # Test model:
   curl -X POST http://localhost:${PORT}/api/test \\
     -H "Content-Type: application/json" \\
-    -d '{"query": "Say hello in French"}'
+    -d '{"query": "Say hello"}'
   
   # Run mission:
   curl -X POST http://localhost:${PORT}/api/mission \\
     -H "Content-Type: application/json" \\
-    -d '{"query": "What is the capital of France?"}'
+    -d '{"query": "What is the capital of France?", "threadId": "test-123"}'
   `);
 });
