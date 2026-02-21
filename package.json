@@ -1,0 +1,33 @@
+{
+  "name": "autonomous-multi-agent-backend",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "node --loader ts-node/esm src/server.ts",
+    "dev": "NODE_OPTIONS='--no-deprecation' && nodemon --exec node --loader ts-node/esm src/server.ts",
+    "list-missions": "tsx src/utils/listThreads.ts",
+    "cleanup-missions": "tsx src/utils/listThreads.ts --cleanup"
+  },
+  "dependencies": {
+    "@langchain/community": "^0.3.0",
+    "@langchain/core": "^0.3.0",
+    "@langchain/langgraph": "^0.2.0",
+    "@langchain/langgraph-checkpoint-sqlite": "^1.0.1",
+    "@langchain/ollama": "^0.1.0",
+    "axios": "^1.13.5",
+    "dotenv": "^16.4.0",
+    "duck-duck-scrape": "^2.2.7",
+    "express": "^4.19.0",
+    "kaibanjs": "^0.23.1",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "tsx": "^4.21.0",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "nodemon": "^3.1.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.3.3"
+  }
+}
