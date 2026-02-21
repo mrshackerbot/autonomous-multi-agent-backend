@@ -1,0 +1,278 @@
+<!doctype html>
+<html>
+  <head>
+    <title>Multi-Agent Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+    <style>
+      .log-entry {
+        animation: slideIn 0.3s ease;
+      }
+      @keyframes slideIn {
+        from {
+          opacity: 0;
+          transform: translateY(-10px);
+        }
+        to {
+          opacity: 1;
+          transform: translateY(0);
+        }
+      }
+    </style>
+  </head>
+  <body class="bg-gray-100">
+    <div class="container mx-auto p-4">
+      <!-- Header -->
+      <div class="flex justify-between items-center mb-6">
+        <h1 class="text-3xl font-bold">🤖 Multi-Agent Dashboard</h1>
+        <div class="flex gap-2">
+          <button
+            onclick="clearCompleted()"
+            class="bg-red-500 hover:bg-red-600 text-white px-4 py-2 rounded"
+          >
+            Clear Completed
+          </button>
+          <button
+            onclick="refreshData()"
+            class="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded"
+          >
+            Refresh
+          </button>
+        </div>
+      </div>
+
+      <!-- Stats Cards -->
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+        <div class="bg-white rounded-lg shadow p-4">
+          <div class="text-gray-500 text-sm">Active Missions</div>
+          <div id="active-count" class="text-3xl font-bold">0</div>
+        </div>
+        <div class="bg-white rounded-lg shadow p-4">
+          <div class="text-gray-500 text-sm">Total Logs</div>
+          <div id="total-logs" class="text-3xl font-bold">0</div>
+        </div>
+        <div class="bg-white rounded-lg shadow p-4">
+          <div class="text-gray-500 text-sm">System Status</div>
+          <div id="system-status" class="text-lg font-bold text-green-600">
+            🟢 Online
+          </div>
+        </div>
+      </div>
+
+      <!-- Active Missions -->
+      <div class="bg-white rounded-lg shadow p-4 mb-6">
+        <h2 class="text-xl font-bold mb-4">🎯 Active Missions</h2>
+        <div id="missions-container" class="space-y-2">
+          <div class="text-gray-500 text-center py-4">No active missions</div>
+        </div>
+      </div>
+
+      <!-- Live Logs -->
+      <div class="bg-white rounded-lg shadow p-4">
+        <div class="flex justify-between items-center mb-4">
+          <h2 class="text-xl font-bold">📋 Live Mission Logs</h2>
+          <div class="flex gap-2">
+            <select
+              id="log-filter"
+              onchange="filterLogs()"
+              class="border rounded px-2 py-1"
+            >
+              <option value="all">All</option>
+              <option value="started">Started</option>
+              <option value="completed">Completed</option>
+              <option value="error">Errors</option>
+            </select>
+            <button
+              onclick="clearLogs()"
+              class="text-sm text-red-500 hover:text-red-600"
+            >
+              Clear
+            </button>
+          </div>
+        </div>
+        <div
+          id="logs-container"
+          class="bg-gray-900 text-green-400 p-4 rounded h-96 overflow-y-auto font-mono text-sm"
+        >
+          <div class="text-center text-gray-500">
+            Waiting for mission logs...
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      const socket = io("http://localhost:3001");
+      let allLogs = [];
+      let currentFilter = "all";
+
+      // Socket event handlers
+      socket.on("missions:initial", (missions) => {
+        updateMissions(missions);
+      });
+
+      socket.on("logs:initial", (logs) => {
+        allLogs = logs;
+        updateLogs();
+      });
+
+      socket.on("stats:update", (stats) => {
+        document.getElementById("active-count").textContent = stats.activeCount;
+        document.getElementById("total-logs").textContent = stats.totalLogs;
+      });
+
+      socket.on("mission:update", (mission) => {
+        // Add to logs
+        allLogs.unshift(mission);
+        updateLogs();
+
+        // Update missions display
+        fetchActiveMissions();
+
+        // Show notification
+        showNotification(mission);
+      });
+
+      socket.on("missions:cleared", () => {
+        document.getElementById("missions-container").innerHTML =
+          '<div class="text-gray-500 text-center py-4">No active missions</div>';
+      });
+
+      // Fetch active missions
+      async function fetchActiveMissions() {
+        try {
+          const response = await fetch(
+            "http://localhost:3001/api/missions/active",
+          );
+          const missions = await response.json();
+          updateMissions(missions);
+        } catch (error) {
+          console.error("Failed to fetch missions:", error);
+        }
+      }
+
+      // Update missions display
+      function updateMissions(missions) {
+        const container = document.getElementById("missions-container");
+
+        if (!missions || missions.length === 0) {
+          container.innerHTML =
+            '<div class="text-gray-500 text-center py-4">No active missions</div>';
+          return;
+        }
+
+        let html = "";
+        missions.forEach((mission) => {
+          const statusColor =
+            {
+              started: "text-blue-600",
+              completed: "text-green-600",
+              error: "text-red-600",
+            }[mission.status] || "text-gray-600";
+
+          html += `
+                    <div class="border rounded p-3 hover:shadow transition">
+                        <div class="flex justify-between items-start">
+                            <div>
+                                <div class="font-bold">${mission.threadId}</div>
+                                <div class="text-sm text-gray-600">${mission.step || "Processing..."}</div>
+                                <div class="text-xs text-gray-400">${new Date(mission.timestamp).toLocaleTimeString()}</div>
+                            </div>
+                            <div class="${statusColor} font-semibold">${mission.status}</div>
+                        </div>
+                    </div>
+                `;
+        });
+
+        container.innerHTML = html;
+      }
+
+      // Update logs display
+      function updateLogs() {
+        const container = document.getElementById("logs-container");
+        const filtered =
+          currentFilter === "all"
+            ? allLogs
+            : allLogs.filter((log) => log.status === currentFilter);
+
+        if (filtered.length === 0) {
+          container.innerHTML =
+            '<div class="text-center text-gray-500">No logs to display</div>';
+          return;
+        }
+
+        let html = "";
+        filtered.forEach((log, index) => {
+          const time = new Date(log.timestamp).toLocaleTimeString();
+          const statusColor =
+            {
+              started: "text-blue-400",
+              completed: "text-green-400",
+              error: "text-red-400",
+            }[log.status] || "text-gray-400";
+
+          html += `
+                    <div class="log-entry mb-1 ${statusColor}">
+                        <span class="text-gray-500">[${time}]</span>
+                        <span class="font-bold">${log.threadId}:</span>
+                        <span>${log.step || log.status}</span>
+                        ${log.data ? `<span class="text-gray-400"> - ${JSON.stringify(log.data).substring(0, 50)}</span>` : ""}
+                    </div>
+                `;
+        });
+
+        container.innerHTML = html;
+        container.scrollTop = container.scrollHeight;
+      }
+
+      // Filter logs
+      function filterLogs() {
+        currentFilter = document.getElementById("log-filter").value;
+        updateLogs();
+      }
+
+      // Clear logs
+      function clearLogs() {
+        allLogs = [];
+        updateLogs();
+      }
+
+      // Clear completed missions
+      async function clearCompleted() {
+        try {
+          await fetch("http://localhost:3001/api/missions/clear", {
+            method: "POST",
+          });
+          fetchActiveMissions();
+        } catch (error) {
+          console.error("Failed to clear missions:", error);
+        }
+      }
+
+      // Refresh data
+      function refreshData() {
+        fetchActiveMissions();
+      }
+
+      // Show notification
+      function showNotification(mission) {
+        if (Notification.permission === "granted") {
+          new Notification("Mission Update", {
+            body: `${mission.threadId}: ${mission.step || mission.status}`,
+            icon: "https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72/1f916.png",
+          });
+        } else if (Notification.permission !== "denied") {
+          Notification.requestPermission();
+        }
+      }
+
+      // Request notification permission
+      if (Notification.permission === "default") {
+        Notification.requestPermission();
+      }
+
+      // Initial load
+      fetchActiveMissions();
+    </script>
+  </body>
+</html>

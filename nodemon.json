@@ -1,0 +1,9 @@
+{
+  "watch": ["src"],
+  "ext": "ts",
+  "exec": "node --import=ts-node/esm src/server.ts",
+  "env": {
+    "NODE_ENV": "development",
+    "NODE_OPTIONS": "--no-warnings"
+  }
+}

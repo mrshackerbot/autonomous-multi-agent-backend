@@ -1,120 +1,140 @@
 import "dotenv/config";
 import express from "express";
 import { getGraphApp } from "./index.js";
+import pino from "pino";
+import { ChatOllama } from "@langchain/ollama";
 import axios from "axios";
 
-const server = express();
-server.use(express.json());
-
-// Initialize the app once
-const teamGraph = await getGraphApp();
-
-/**
- * Trigger a Multi-Agent Mission
- * @body {string} query - The user request
- * @body {string} threadId - Unique ID for session persistence
- */
-server.post("/api/mission", async (req, res) => {
-  const { query, threadId } = req.body;
-
-  if (!query || !threadId) {
-    return res.status(400).json({ error: "Missing query or threadId" });
-  }
-
-  const config = { configurable: { thread_id: threadId } };
-
-  try {
-    const finalState = await teamGraph.invoke({ input: query }, config);
-    res.json({ success: true, threadId, data: finalState.results });
-  } catch (error) {
-    console.error("Critical Backend Error:", error);
-    res
-      .status(500)
-      .json({ error: "The multi-agent team encountered a failure." });
-  }
+const logger = pino({
+  level: "info",
+  transport: {
+    target: "pino-pretty",
+    options: { colorize: true },
+  },
 });
 
-server.post("/api/mission/retry", async (req, res) => {
-  const { threadId } = req.body;
+const app = express();
+const PORT = process.env.PORT || 3000;
+const BOARD_URL = process.env.BOARD_URL || "http://localhost:3001";
 
-  console.log("Retrying mission with threadId:", threadId);
+app.use(express.json());
 
-  if (!threadId) {
-    return res.status(400).json({ error: "Missing threadId to retry." });
-  }
-
-  const config = { configurable: { thread_id: threadId } };
-
+// Send update to monitoring board
+async function sendBoardUpdate(
+  threadId: string,
+  status: string,
+  step?: string,
+  data?: any,
+) {
   try {
-    /**
-     * TRICK: Pass 'null' or an empty object to .invoke()
-     * LangGraph looks at the SQLite checkpoint for 'threadId'.
-     * It sees the graph stopped at a specific node and RE-RUNS that node.
-     */
-    const currentState = await teamGraph.invoke(null, config);
-
-    res.json({
-      success: true,
-      recovered: true,
-      data: currentState.results,
+    await axios.post(`${BOARD_URL}/api/mission/update`, {
+      threadId,
+      status,
+      step,
+      data,
     });
   } catch (error) {
-    console.error("Retry Failed:", error);
-    res.status(500).json({
-      error: "Still failing. Check if Ollama is overwhelmed.",
-      tip: "Try reducing the model size or increasing VRAM.",
-    });
-  }
-});
-
-async function verifyOllamaSetup() {
-  const OLLAMA_URL = "http://127.0.0.1:11434/api/tags";
-  const REQUIRED_MODELS = ["phi:latest"];
-
-  console.log("🔍 Checking Local AI Infrastructure...");
-
-  try {
-    // 1. Check if Ollama is even running
-    const response = await axios.get(OLLAMA_URL);
-    const installedModels = response.data.models.map((m: any) => m.name);
-    console.log(
-      "✅ Ollama is running. Installed models:",
-      installedModels.join(", "),
-    );
-
-    // 2. Check if the "Muscles" and "Brains" are downloaded
-    for (const model of REQUIRED_MODELS) {
-      console.log(`Checking model: ${model}...`);
-      if (!installedModels.includes(model)) {
-        console.warn(
-          `⚠️  Model [${model}] is missing! Run: 'ollama pull ${model}'`,
-        );
-      } else {
-        console.log(`✅ Model [${model}] is ready.`);
-      }
-    }
-    console.log("🚀 Ollama Connection: STABLE\n");
-  } catch (error: any) {
-    console.log("❌ Ollama Connection Failed:", error.message);
-    console.error(`
-    ❌ CRITICAL ERROR: Cannot connect to Ollama at 127.0.0.1:11434.
-    
-    TIPS:
-    1. Is the Ollama app running?
-    2. Try running 'ollama serve' in a separate terminal.
-    3. If using Docker, use 'http://host.docker.internal:11434'.
-    `);
-    process.exit(1); // Stop the server if the "Brain" is missing
+    // Board might not be running, ignore
   }
 }
 
-const PORT = process.env.PORT || 3000;
-server.listen(PORT, async () => {
-  await verifyOllamaSetup();
+// Logging middleware
+app.use((req, res, next) => {
+  logger.info({ method: req.method, url: req.url }, "Request");
+  next();
+});
+
+// Health check
+app.get("/health", (req, res) => {
+  res.json({
+    status: "ok",
+    time: new Date().toISOString(),
+  });
+});
+
+// Simple test endpoint
+app.post("/api/test", async (req, res) => {
+  const { query } = req.body;
+
+  try {
+    const testModel = new ChatOllama({
+      model: "phi3:mini",
+      temperature: 0,
+    });
+
+    const response = await testModel.invoke(query || "Say hello");
+    res.json({
+      success: true,
+      response: response.content,
+    });
+  } catch (error: any) {
+    logger.error({ error: error.message }, "Test failed");
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Mission endpoint
+app.post("/api/mission", async (req, res) => {
+  const { query, threadId } = req.body;
+  const missionId = threadId || `mission-${Date.now()}`;
+
+  logger.info({ missionId, query }, "🎯 Mission received");
+
+  // Notify board
+  await sendBoardUpdate(missionId, "started", "Mission received", { query });
+
+  if (!query) {
+    await sendBoardUpdate(missionId, "error", "Missing query");
+    return res.status(400).json({ error: "Missing query" });
+  }
+
+  try {
+    const graph = await getGraphApp();
+    const initialState: any = {
+      input: query,
+      output: "",
+      steps: [],
+      research: "",
+    };
+
+    await sendBoardUpdate(missionId, "processing", "Starting supervisor");
+    const result = await graph.invoke(initialState);
+
+    await sendBoardUpdate(missionId, "completed", "Mission complete", {
+      outputLength: result.output?.length,
+    });
+
+    logger.info({ missionId }, "✅ Mission complete");
+    res.json({
+      success: true,
+      threadId: missionId,
+      data: result.output || "No output generated",
+      steps: result.steps || [],
+    });
+  } catch (error: any) {
+    logger.error({ error: error.message, missionId }, "❌ Mission failed");
+    await sendBoardUpdate(missionId, "error", error.message);
+    res.status(500).json({
+      success: false,
+      error: error.message,
+    });
+  }
+});
+
+// Start server
+app.listen(PORT, () => {
+  logger.info(`🚀 Main server running on http://localhost:${PORT}`);
   console.log(`
-  🚀 Autonomous Multi Agent Backend Online
-  📡 API: http://localhost:${PORT}/api/mission
-  🧠 LLMs: Ollama (Local)
-  💾 DB: SQLite (checkpoints.db)
+  📝 Commands:
+  
+  # Test model:
+  curl -X POST http://localhost:${PORT}/api/test \\
+    -H "Content-Type: application/json" \\
+    -d '{"query": "Say hello in French"}'
+  
+  # Run mission:
+  curl -X POST http://localhost:${PORT}/api/mission \\
+    -H "Content-Type: application/json" \\
+    -d '{"query": "What is the capital of France?"}'
   `);
 });
